@@ -47,9 +47,10 @@ type QQClient struct {
 	Conn                    net.Conn
 	ConnectTime             time.Time
 
-	decoders map[string]func(*QQClient, uint16, []byte) (interface{}, error)
-	handlers sync.Map
-	server   *net.TCPAddr
+	decoders         map[string]func(*QQClient, uint16, []byte) (interface{}, error)
+	handlers         sync.Map
+	server           *net.TCPAddr
+	currentServerNum int
 
 	syncCookie       []byte
 	pubAccountCookie []byte
@@ -102,6 +103,17 @@ type loginSigInfo struct {
 
 func init() {
 	rand.Seed(time.Now().UTC().UnixNano())
+	// 初始化服务器列表
+	addrs, err := net.LookupIP("msfwifi.3g.qq.com")
+	if err == nil && len(addrs) > 0 {
+		for _, addr := range addrs {
+			servers = append(servers, &net.TCPAddr{
+				IP:   addr.To4(),
+				Port: 8080,
+			})
+
+		}
+	}
 }
 
 // NewClient create new qq client
@@ -871,15 +883,7 @@ func (c *QQClient) connect() error {
 		if c.CustomServer != nil {
 			c.server = c.CustomServer
 		} else {
-			addrs, err := net.LookupIP("msfwifi.3g.qq.com")
-			if err == nil && len(addrs) > 0 {
-				c.server = &net.TCPAddr{
-					IP:   addrs[rand.Intn(len(addrs))],
-					Port: 8080,
-				}
-			} else {
-				c.server = servers[rand.Intn(len(servers))]
-			}
+			c.server = servers[0]
 		}
 	}
 	c.Info("connect to server: %v", c.server.String())
@@ -895,6 +899,16 @@ func (c *QQClient) connect() error {
 	c.Conn = conn
 	c.onlinePushCache = []int16{}
 	return nil
+}
+
+// 尝试下一个server ip
+func (c *QQClient) nextServer() {
+	c.Info("changing next server")
+	c.currentServerNum += 1
+	if c.currentServerNum > len(servers) {
+		c.currentServerNum = 0
+	}
+	c.server = servers[c.currentServerNum]
 }
 
 func (c *QQClient) registerClient() {
@@ -1054,7 +1068,10 @@ func (c *QQClient) doHeartbeat() {
 		seq := c.nextSeq()
 		sso := packets.BuildSsoPacket(seq, uint32(SystemDeviceInfo.Protocol), "Heartbeat.Alive", SystemDeviceInfo.IMEI, []byte{}, c.OutGoingPacketSessionId, []byte{}, c.ksid)
 		packet := packets.BuildLoginPacket(c.Uin, 0, []byte{}, sso, []byte{})
-		_, _ = c.sendAndWait(seq, packet)
+		_, err := c.sendAndWait(seq, packet)
+		if err != nil {
+			c.nextServer()
+		}
 		_, pkt := c.buildGetMessageRequestPacket(msg.SyncFlag_START, time.Now().Unix())
 		c.send(pkt)
 		time.AfterFunc(30*time.Second, c.doHeartbeat)
